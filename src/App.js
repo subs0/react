@@ -1,8 +1,15 @@
-import React, { createContext, useContext, useState, useReducer } from "react"
+import React, {
+    createContext,
+    useContext,
+    useState,
+    useReducer,
+    useEffect,
+    createElement,
+} from "react"
 import { Button } from "antd"
 import "./App.less"
 
-import { getInUnsafe } from "@thi.ng/paths"
+import { getInUnsafe, getIn } from "@thi.ng/paths"
 import { isObject } from "@thi.ng/checks"
 import { EquivMap } from "@thi.ng/associative"
 import { fromAtom } from "@thi.ng/rstream"
@@ -40,7 +47,7 @@ trace$("command$ ->", command$)
 const getSomeJSON = async (path, uid) => {
     const text_base = "https://jsonplaceholder.typicode.com/"
     const img_base = (id, sz) =>
-        `https://i.picsum.photos/id/${id}/${sz}/${sz}.jpg`
+        `http://lorempixel.com/${sz}/${sz}/sports/${id}/`
 
     const data = uid
         ? (async () => {
@@ -76,7 +83,7 @@ const getSomeJSON = async (path, uid) => {
                       description: `List page for ${path}`,
                       image: { url: img_base(222, 200) },
                   },
-                  [K.DOM.BODY]: list.map((c, i) => ({
+                  [K.DOM_BODY]: list.map((c, i) => ({
                       img: img_base(i + 1, 200),
                       text: c,
                       uid: i + 1,
@@ -123,24 +130,30 @@ const routerCfg = async url => {
     let RES = new EquivMap([
         [
             { ...match, [K.URL.PATH]: ["todos"] },
-            { [K.URL.DATA]: () => getSomeJSON("todos"), [K.URL.PAGE]: page1 },
+            {
+                [K.URL.DATA]: () => getSomeJSON("todos"),
+                [K.URL.PAGE]: "page-1",
+            },
         ],
         [
             { ...match, [K.URL.PATH]: ["todos", p_b] },
             {
                 [K.URL.DATA]: () => getSomeJSON("todos", p_b),
-                [K.URL.PAGE]: page2,
+                [K.URL.PAGE]: "page-2",
             },
         ],
         [
             { ...match, [K.URL.PATH]: ["users"] },
-            { [K.URL.DATA]: () => getSomeJSON("users"), [K.URL.PAGE]: page1 },
+            {
+                [K.URL.DATA]: () => getSomeJSON("users"),
+                [K.URL.PAGE]: "page-1",
+            },
         ],
         [
             { ...match, [K.URL.PATH]: ["users", p_b] },
             {
                 [K.URL.DATA]: () => getSomeJSON("users", p_b),
-                [K.URL.PAGE]: page2,
+                [K.URL.PAGE]: "page-2",
             },
         ],
         // home page (empty path)
@@ -150,12 +163,12 @@ const routerCfg = async url => {
                 [K.URL.DATA]: () => (
                     console.log("HOME"), getSomeJSON("users", 10)
                 ),
-                [K.URL.PAGE]: page2,
+                [K.URL.PAGE]: "page-2",
             },
         ], // get match || 404 data
     ]).get(match) || {
         [K.URL.DATA]: () => getSomeJSON("users", 10),
-        [K.URL.PAGE]: page2,
+        [K.URL.PAGE]: "page-2",
     }
 
     let data = RES[K.URL.DATA]
@@ -169,6 +182,32 @@ const logger = registerCMD({
     args: ({ x }) => x,
     work: console.log,
 })
+
+const createCursor = atom => (path, uid = `${new Date()}`) => {
+    const [state, setState] = useState({})
+    const cursor = new Cursor(atom, path)
+    cursor.addWatch(
+        uid,
+        (id, bfr, aft) => (console.log(`${id} cursor triggered`), setState(aft))
+    )
+    return [state, cursor]
+}
+
+const useCursor = createCursor($store$)
+
+// default value ({ run$  }) is applied when no Provider is found in the inheritance tree of the component (orphans)
+const CTX = createContext({
+    run$,
+    useCursor,
+    $store$,
+    parse,
+})
+//@ts-ignore
+const Pre = ({ data }) => {
+    console.log("Pre")
+    return <pre {...{ href: "bloop" }}>{JSON.stringify(data, null, 2)}</pre>
+}
+
 //
 //                              d8                        d8
 //   e88~~\  e88~-_  888-~88e _d88__  e88~~8e  Y88b  /  _d88__
@@ -179,30 +218,6 @@ const logger = registerCMD({
 //
 //
 
-const page = () => {
-    return <div>Page</div>
-}
-
-const createCursor = atom => path => {
-    const [state, setState] = useState({})
-    const cursor = new Cursor(atom, path)
-    cursor.addWatch(`${new Date()}`, (id, bfr, aft) => setState(aft))
-    return [state, cursor]
-}
-
-//$store$.swapIn(["count"], x => 1)
-
-const useCursor = createCursor($store$)
-// default value ({ run$  }) is applied when no Provider is found in the inheritance tree of the component (orphans)
-const CTX = createContext({
-    run$,
-    useCursor,
-    $store$,
-})
-//@ts-ignore
-const Pre = ({ children }) => <pre data={children}>{children}</pre>
-
-// Distinct Provider component which encapsulates state and effects and prevents arbitrary rerendering
 //prettier-ignore
 const Provider = ({ children, CFG = {} }) => {
    
@@ -211,7 +226,7 @@ const Provider = ({ children, CFG = {} }) => {
     // default wrapper for all pages
     const View       = CFG[K.CFG_VIEW] || Pre
     // 
-    const router     = CFG[K.CFG_RUTR] || {}
+    const router     = CFG[K.CFG_RUTR] || routerCfg
     const log$       = CFG[K.CFG_LOG$]
 
     // clean URL
@@ -222,27 +237,14 @@ const Provider = ({ children, CFG = {} }) => {
     const escaped    = str => str.replace(escRGX, "\\$&")
     const RGX        = prfx ? new RegExp(escaped(prfx || ""), "g") : null
 
-    //if (router) registerRouterDOM(router)
-    //else throw new Error(`no \`${K.CFG_RUTR}\` found in Provider CFG`)
+    if (router) registerRouterDOM(router)
+    else throw new Error(`no \`${K.CFG_RUTR}\` found in Provider CFG`)
     
 
-    const shell = state$ => {
-        const Page = state$[K.$$_VIEW] || Pre
-        return (
-        log$ ? console.log(log$, state$) : null,
-        state$[K.$$_LOAD]
-            ? null
-            // TODO: page component is set into the state => props.data = injector
-            : (
-            <View>
-                <Page data={getInUnsafe(state$, state$[K.$$_PATH])}/>
-            </View>
-            )
-        )
-    }
-
+    // Prime store with CFG state
     //$store$.resetInUnsafe(K.$$_ROOT, root)
-    //$store$.swap(x => ({...x, ...CFG}))
+    //$store$.resetIn([K.$$_VIEW],  View)
+    $store$.swap(x => ({...CFG, ...x}))
     //console.log("$store$.deref():", $store$.deref() )
 
     return (
@@ -269,57 +271,118 @@ const LogButton = () => {
     // only works if swapped-in ex-post 🤔
     //$store$.swapIn(["count"], x => 1)
 
-    console.log("$store$.deref():", $store$.deref())
-
-    console.log("count:", count)
+    //console.log("$store$.deref():", $store$.deref())
     //console.log("parse:", parse())
 
     const increment = crs => () => crs.swap(num => num + 1)
     const decrement = crs => () => crs.swap(num => num - 1)
 
+    const store = $store$.deref()
+    const num = getInUnsafe(store, ["count"])
+    const src = getInUnsafe(store, ["img"])
     return (
-        <Button
-            type='primary'
-            onClick={
-                () => {
-                    countCursor.swap(x => x + 1)
+        <>
+            <img src={src} />
+            <br />
+            <Button
+                type='primary'
+                onClick={
+                    increment(countCursor)
+                    //() => {
+                    //    run$.next({ [K.CMD_SUB$]: "_" })
+                    //}
                 }
-                //() => {
-                //    run$.next([
-                //        { args: { x: "hello world" } },
-                //        { ...logger, args: "bloop" },
-                //    ])
-                //})
-            }
+            >
+                {num}
+            </Button>
+            <br />
+        </>
+    )
+}
+
+const View = () => {
+    const { run$, useCursor, $store$, parse } = useContext(CTX)
+    const [Page, pageCursor] = useCursor([K.$$_VIEW])
+    const [loading, loadingCursor] = useCursor([K.$$_LOAD])
+
+    //console.log("Page:", View)
+    useEffect(() => {
+        console.log("rerendered Page:", Page)
+        // rerender when loading state changes
+    }, [loading])
+    //const Page = Object.keys(View).length ? View : Pre
+    const store = $store$.deref()
+    //const path = state[K.$$_PATH]
+    //console.log({ loading })
+
+    const RenderPage =
+        {
+            "page-1": Page1,
+            "page-2": Page2,
+        }[Page] || Pre
+    //console.log("_Page:", RenderPage)
+    //    _Page,
+    //    { data: state }
+    //    //h("h1", null, `PAGE 1:`),
+    //    //h("pre", null, JSON.stringify(state, null, 2))
+    //)
+    return <RenderPage data={store} />
+}
+
+const Link = ({ to, children }) => {
+    const { run$, useCursor, $store$, parse } = useContext(CTX)
+    // log("pathLink"),
+    const path = `/${to}`
+    console.log({ path })
+    return (
+        <a
+            href={path}
+            onClick={e => {
+                e.preventDefault()
+                //console.log("Link clicked")
+                //console.log({ path })
+                run$.next({ ...HURL, args: e })
+            }}
         >
-            {isObject(count) ? (countCursor.reset(0), count) : count || "?"}
-        </Button>
+            {children}
+        </a>
     )
 }
 
-const page1 = () => {
-    return (
-        <div>
-            <h1>PAGE 1</h1>
-        </div>
+const h = createElement
+
+const Page1 = ({ data }) => {
+    //const { run$, useCursor, $store$, parse } = useContext(CTX)
+    //const state = $store$.deref()
+    //const path = state[K.$$_PATH]
+
+    return h(
+        "pre",
+        { className: "ass" },
+        h("h1", null, `PAGE 1:`),
+        h(LogButton),
+        JSON.stringify(data, null, 2)
     )
 }
 
-const page2 = () => {
-    return (
-        <div>
-            <h1>PAGE 2</h1>
-        </div>
+const Page2 = ({ data }) => {
+    return h(
+        "pre",
+        { className: "boobs" },
+        h("h1", null, `PAGE 2:`),
+        JSON.stringify(data, null, 2)
     )
 }
 
 const App = () => {
     return (
         // @ts-ignore
-        <Provider>
-            <div className='App'>
-                <LogButton />
-            </div>
+        <Provider CFG={{ count: 0 }}>
+            <Link to='users'>users</Link>
+            <br />
+            <Link to='users/1'>users/1</Link>
+            <br />
+            <View />
         </Provider>
     )
 }

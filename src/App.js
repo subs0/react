@@ -1,26 +1,26 @@
 import React, {
+    createElement,
     createContext,
     useContext,
     useState,
-    useReducer,
     useEffect,
-    createElement,
+    useLayoutEffect,
+    useMemo,
 } from "react"
+
 import { Button } from "antd"
+
 import "./App.less"
 
-import { getInUnsafe, getIn } from "@thi.ng/paths"
+import { getIn } from "@thi.ng/paths"
 import { isObject } from "@thi.ng/checks"
 import { EquivMap } from "@thi.ng/associative"
-import { fromAtom } from "@thi.ng/rstream"
-import { map } from "@thi.ng/transducers"
-import { Cursor, Atom } from "@thi.ng/atom"
+import { Cursor } from "@thi.ng/atom"
 
 //import "regenerator-runtime"
 // import scrolly from "@mapbox/scroll-restorer"
 // scrolly.start()
 
-// ⚠ <=> API SURFACE AREA TOO LARGE <=> ⚠ .
 import { registerCMD, command$, out$, run$ } from "@-0/spool"
 import {
     INJECT_HEAD,
@@ -55,7 +55,7 @@ const getSomeJSON = async (path, uid) => {
                   r.json()
               )
               let {
-                  name = `User ${getInUnsafe(detail, "id")}`,
+                  name = `User ${getIn(detail, ["id"])}`,
                   company: { catchPhrase } = { catchPhrase: detail.title },
               } = detail
               return {
@@ -160,9 +160,7 @@ const routerCfg = async url => {
         [
             { ...match, [K.URL.PATH]: [] },
             {
-                [K.URL.DATA]: () => (
-                    console.log("HOME"), getSomeJSON("users", 10)
-                ),
+                [K.URL.DATA]: () => (log("HOME"), getSomeJSON("users", 10)),
                 [K.URL.PAGE]: "page-2",
             },
         ], // get match || 404 data
@@ -180,15 +178,15 @@ const routerCfg = async url => {
 const logger = registerCMD({
     sub$: "logger",
     args: ({ x }) => x,
-    work: console.log,
+    work: log,
 })
 
-const createCursor = atom => (path, uid = `${new Date()}`) => {
-    const [state, setState] = useState({})
+const createCursor = atom => (path, uid = `${Date.now()}`) => {
+    const [state, setState] = useState(null)
     const cursor = new Cursor(atom, path)
     cursor.addWatch(
         uid,
-        (id, bfr, aft) => (console.log(`${id} cursor triggered`), setState(aft))
+        (id, bfr, aft) => (log(`${id} cursor triggered`), setState(aft))
     )
     return [state, cursor]
 }
@@ -202,10 +200,12 @@ const CTX = createContext({
     $store$,
     parse,
 })
+
 //@ts-ignore
 const Pre = ({ data }) => {
-    console.log("Pre")
-    return <pre {...{ href: "bloop" }}>{JSON.stringify(data, null, 2)}</pre>
+    const json = JSON.stringify(data, null, 2)
+    //log("Pre, json:", json)
+    return <pre>{json}</pre>
 }
 
 //
@@ -221,39 +221,34 @@ const Pre = ({ data }) => {
 //prettier-ignore
 const Provider = ({ children, CFG = {} }) => {
    
-    // DOM node to mount to
-    const root       = CFG[K.CFG_ROOT] || document.body
-    // default wrapper for all pages
-    const View       = CFG[K.CFG_VIEW] || Pre
-    // 
-    const router     = CFG[K.CFG_RUTR] || routerCfg
-    const log$       = CFG[K.CFG_LOG$]
+    //const DOMRoot     = CFG[K.CFG_ROOT] || document.body 
+    // ⬆ ⚠ can't refer to the root node (circular reference)
 
+    // default wrapper for pages before they are specified
+    const DefaultView = CFG[K.CFG_VIEW] || Pre
+    const router      = CFG[K.CFG_RUTR]
     // clean URL
-    const knowns     = Object.values(CFG) || []
-    const prfx       = router[K.ROUTER_PRFX] || null
-    const [, others] = diff_keys(knowns, CFG)
-    const escRGX     = /[-/\\^$*+?.()|[\]{}]/g
-    const escaped    = str => str.replace(escRGX, "\\$&")
-    const RGX        = prfx ? new RegExp(escaped(prfx || ""), "g") : null
+    const knowns      = Object.values(K.CFG) || []
+    const prfx        = router[K.ROUTER_PRFX] || null
+    const [, others]  = diff_keys(knowns, CFG)
+    const escRGX      = /[-/\\^$*+?.()|[\]{}]/g
+    const escaped     = str => str.replace(escRGX, "\\$&")
+    const RGX         = prfx ? new RegExp(escaped(prfx || ""), "g") : null
 
     if (router) registerRouterDOM(router)
     else throw new Error(`no \`${K.CFG_RUTR}\` found in Provider CFG`)
     
-
     // Prime store with CFG state
-    //$store$.resetInUnsafe(K.$$_ROOT, root)
-    //$store$.resetIn([K.$$_VIEW],  View)
     $store$.swap(x => ({...CFG, ...x}))
-    //console.log("$store$.deref():", $store$.deref() )
+    //log("$store$.deref():", $store$.deref() )
 
     return (
         <CTX.Provider value={{
             run$,
             useCursor,
             $store$,
-            parse: () =>
-              parse(window.location.href, RGX), // <- 🔍
+            parse: () => parse(window.location.href, RGX),
+            DefaultView,
             ...others
           }}>
             { children }
@@ -261,86 +256,74 @@ const Provider = ({ children, CFG = {} }) => {
     )
 }
 
+const View = () => {
+    const { useCursor, $store$, DefaultView } = useContext(CTX)
+    const [Page, pageCursor] = useCursor([K.$$_VIEW], "View Page")
+    const [loading, loadingCursor] = useCursor([K.$$_LOAD], "View loading")
+
+    //layouteffect needed due to async shit...
+    useLayoutEffect(() => {
+        // re-render when loading state changes
+        //log("re-rendered Page:", Page)
+        // cleanup
+        return () => {
+            //log("cleaning up pageCursor and loadingCursor")
+            pageCursor.release()
+            loadingCursor.release()
+        }
+    }, [loading, loadingCursor, Page, pageCursor])
+
+    const store = $store$.deref()
+
+    const RenderPage =
+        {
+            "page-1": Page1,
+            "page-2": Page2,
+        }[Page] || DefaultView
+
+    return <RenderPage data={store} />
+}
+
 const LogButton = () => {
-    // actually use the context
-    //const bloop = useContext(CTX)
-    //console.log("bloop:", bloop)
-    const { run$, useCursor, $store$, parse } = useContext(CTX)
+    const { useCursor, $store$ } = useContext(CTX)
 
-    const [count, countCursor] = useCursor(["count"])
-    // only works if swapped-in ex-post 🤔
-    //$store$.swapIn(["count"], x => 1)
-
-    //console.log("$store$.deref():", $store$.deref())
-    //console.log("parse:", parse())
+    const [count, countCursor] = useCursor(["count"], "LogButton count")
 
     const increment = crs => () => crs.swap(num => num + 1)
     const decrement = crs => () => crs.swap(num => num - 1)
 
     const store = $store$.deref()
-    const num = getInUnsafe(store, ["count"])
-    const src = getInUnsafe(store, ["img"])
+    const num = getIn(store, ["count"])
+    const src = getIn(store, ["img"])
+
+    useEffect(() => {
+        //log("cleaning up countCursor")
+        return () => {
+            countCursor.release()
+        }
+    }, [count, countCursor])
+
     return (
         <>
-            <img src={src} />
+            <img {...{ src, alt: "sport" }} />
             <br />
-            <Button
-                type='primary'
-                onClick={
-                    increment(countCursor)
-                    //() => {
-                    //    run$.next({ [K.CMD_SUB$]: "_" })
-                    //}
-                }
-            >
-                {num}
+            <Button type='primary' onClick={increment(countCursor)}>
+                inc {num}
             </Button>
             <br />
         </>
     )
 }
 
-const View = () => {
-    const { run$, useCursor, $store$, parse } = useContext(CTX)
-    const [Page, pageCursor] = useCursor([K.$$_VIEW])
-    const [loading, loadingCursor] = useCursor([K.$$_LOAD])
-
-    //console.log("Page:", View)
-    useEffect(() => {
-        console.log("rerendered Page:", Page)
-        // rerender when loading state changes
-    }, [loading])
-    //const Page = Object.keys(View).length ? View : Pre
-    const store = $store$.deref()
-    //const path = state[K.$$_PATH]
-    //console.log({ loading })
-
-    const RenderPage =
-        {
-            "page-1": Page1,
-            "page-2": Page2,
-        }[Page] || Pre
-    //console.log("_Page:", RenderPage)
-    //    _Page,
-    //    { data: state }
-    //    //h("h1", null, `PAGE 1:`),
-    //    //h("pre", null, JSON.stringify(state, null, 2))
-    //)
-    return <RenderPage data={store} />
-}
-
 const Link = ({ to, children }) => {
-    const { run$, useCursor, $store$, parse } = useContext(CTX)
-    // log("pathLink"),
+    const { run$ } = useContext(CTX)
     const path = `/${to}`
-    console.log({ path })
+    log({ path })
     return (
         <a
             href={path}
             onClick={e => {
                 e.preventDefault()
-                //console.log("Link clicked")
-                //console.log({ path })
                 run$.next({ ...HURL, args: e })
             }}
         >
@@ -352,10 +335,6 @@ const Link = ({ to, children }) => {
 const h = createElement
 
 const Page1 = ({ data }) => {
-    //const { run$, useCursor, $store$, parse } = useContext(CTX)
-    //const state = $store$.deref()
-    //const path = state[K.$$_PATH]
-
     return h(
         "pre",
         { className: "ass" },
@@ -374,10 +353,17 @@ const Page2 = ({ data }) => {
     )
 }
 
+//export const root = document.getElementById("root")
+
 const App = () => {
     return (
         // @ts-ignore
-        <Provider CFG={{ count: 0 }}>
+        <Provider
+            CFG={{
+                count: 0,
+                [K.CFG_RUTR]: routerCfg /* circular dep!! [K.CFG_ROOT]: root*/,
+            }}
+        >
             <Link to='users'>users</Link>
             <br />
             <Link to='users/1'>users/1</Link>
@@ -387,8 +373,8 @@ const App = () => {
     )
 }
 
-console.log("registered Commands:", out$.topics.entries())
+log("registered Commands:", out$.topics.entries())
 
-console.log("starting...")
+log("starting...")
 
 export default App
